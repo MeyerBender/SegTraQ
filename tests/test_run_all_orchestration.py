@@ -1,3 +1,4 @@
+import warnings
 from unittest.mock import patch
 
 import segtraq as st
@@ -199,3 +200,38 @@ def test_run_all_result_keys():
         "point_statistics",
         "skipped",
     }
+
+
+def test_run_all_skip_warning_is_not_silenced_by_python_default_warning_dedup():
+    """Regression test: Python's default warning filter shows a given (message, category,
+    module, line) combination only once per process. Since users are expected to call
+    run_all() repeatedly (e.g. interactively, or in a loop over several samples) from the
+    same call site, that default behavior would silently hide the skip warning on every
+    call after the first, even though the module was skipped again. run_all() must force
+    its skip warnings to always show regardless of this history.
+    """
+
+    def raise_for_volume(*args, **kwargs):
+        raise AssertionError("Cannot run volume metrics for 2D data")
+
+    mocks, patchers = _patch_runners(run_volume=raise_for_volume)
+
+    def call_run_all():
+        segtraq = _bare_segtraq()
+        return segtraq.run_all(inplace=False)
+
+    try:
+        with warnings.catch_warnings(record=True) as first_call_warnings:
+            warnings.simplefilter("default")
+            call_run_all()
+
+        # same call site as above (line-for-line identical `call_run_all()` call), which is
+        # exactly the scenario Python's default "once per location" filter would suppress
+        with warnings.catch_warnings(record=True) as second_call_warnings:
+            warnings.simplefilter("default")
+            call_run_all()
+    finally:
+        _stop_all(patchers)
+
+    assert any("run_volume" in str(w.message) for w in first_call_warnings)
+    assert any("run_volume" in str(w.message) for w in second_call_warnings)

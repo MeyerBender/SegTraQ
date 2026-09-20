@@ -1050,6 +1050,17 @@ class SegTraQ:
             (each `None` for a module that was skipped), plus a `"skipped"` dict mapping the
             name of every skipped module to the reason it could not be computed.
         """
+        def _warn_always(message: str) -> None:
+            # Python's default warning filter only shows a given (message, category, location)
+            # combination once per process. That's the wrong behavior here: every call to
+            # run_all() should surface what it skipped, even if an earlier call from the same
+            # line already triggered the same warning. Scoping simplefilter("always") to a
+            # local catch_warnings block makes the warning always show without permanently
+            # altering the caller's own warning filter configuration.
+            with warnings.catch_warnings():
+                warnings.simplefilter("always")
+                warnings.warn(message, stacklevel=3)
+
         label_transfer_kwargs = {} if label_transfer_kwargs is None else dict(label_transfer_kwargs)
         baseline_kwargs = {} if baseline_kwargs is None else dict(baseline_kwargs)
         region_similarity_kwargs = {} if region_similarity_kwargs is None else dict(region_similarity_kwargs)
@@ -1074,10 +1085,7 @@ class SegTraQ:
                 )
                 cell_type_key = "transferred_cell_type"
             except Exception as exc:
-                warnings.warn(
-                    f"Could not run label transfer ({exc}). Cell-type-aware metrics will be limited.",
-                    stacklevel=2,
-                )
+                _warn_always(f"Could not run label transfer ({exc}). Cell-type-aware metrics will be limited.")
 
         reference_kwargs = dict(
             adata_ref=adata_ref,
@@ -1121,7 +1129,7 @@ class SegTraQ:
             try:
                 results[name] = runner()
             except Exception as exc:
-                warnings.warn(f"Skipping `run_{name}`: metric(s) could not be computed ({exc}).", stacklevel=2)
+                _warn_always(f"Skipping `run_{name}`: metric(s) could not be computed ({exc}).")
                 skipped[name] = str(exc)
                 results[name] = None
 
