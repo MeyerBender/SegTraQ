@@ -1,5 +1,3 @@
-import pytest
-
 import segtraq as st
 
 st.settings.n_jobs = -1
@@ -7,14 +5,19 @@ st.settings.n_jobs = -1
 
 # this only tests that run_all works without errors and that it correctly determines
 # which modules can and cannot be run, given the arguments it was passed.
-def test_run_all_skips_modules_missing_prerequisites(segtraq_obj):
-    with pytest.warns(UserWarning, match="run_supervised"):
-        result = segtraq_obj.run_all(inplace=False)
+#
+# note: this intentionally does not gate the call in `pytest.warns(...)`. If `run_all`
+# (or one of the module runners it wraps) ever raised uncaught instead of being caught
+# and recorded as a skip, `pytest.warns` would mask that exception behind a confusing
+# "DID NOT WARN" failure instead of surfacing the real traceback.
+def test_run_all_skips_modules_missing_prerequisites(segtraq_obj, recwarn):
+    result = segtraq_obj.run_all(inplace=False)
 
     # supervised metrics require either `cell_type_key`+`markers` or a reference dataset;
     # none of these are provided here, so this module should be skipped automatically
     assert "supervised" in result["skipped"]
     assert result["supervised"] is None
+    assert any("run_supervised" in str(w.message) for w in recwarn.list)
 
     # all other modules do not strictly require a reference and should run successfully
     assert result["baseline"] is not None
