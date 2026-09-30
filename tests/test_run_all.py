@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 from geopandas.testing import assert_geoseries_equal
 from scipy import sparse
+from sklearn.metrics import adjusted_rand_score
 from spatialdata import SpatialData
 
 import segtraq as st
@@ -21,6 +22,20 @@ ATOL = 1e-8
 # the gene pairs of the mutually exclusive co-expression rate are collected in a set, so their order
 # depends on Python's (randomized) string hashing
 UNORDERED_UNS_FRAMES = {"mutually_exclusive_coexpression_rate": ["gene1", "gene2"]}
+
+# the clustering-stability metrics run PCA -> kNN graph -> Leiden. PCA picks up rounding differences
+# between scipy versions and CPUs, which can move a few borderline cells into another Leiden cluster.
+# exact cluster assignments are therefore not compared, only that the clusterings agree and that the
+# derived stability scores are reproducible within a tolerance.
+LEIDEN_PREFIX = "leiden_"
+LEIDEN_MIN_ARI = 0.95
+CLUSTERING_SCORES = ("cluster_connectedness", "silhouette_score", "mean_purity", "mean_ari")
+CLUSTERING_SCORE_ATOL = 0.02
+PCA_KEY = "X_pca_segtraq"
+PCA_ATOL = 1e-3
+PCA_RTOL = 1e-3
+KNN_GRAPH_KEYS = ("neighbors_segtraq_connectivities", "neighbors_segtraq_distances")
+KNN_MIN_EDGE_OVERLAP = 0.95
 
 
 def _load_generator():
@@ -84,12 +99,64 @@ def _assert_equal(actual, expected, where):
         _assert_array_equal(actual, expected, where)
 
 
+def _assert_leiden_agrees(actual: pd.Series, expected: pd.Series, where):
+    # subset clusterings leave the cells outside the subset unlabeled; the subsets are seeded
+    assert (actual.isna() == expected.isna()).all(), f"{where}: different cells are unlabeled"
+    labeled = expected.notna()
+    ari = adjusted_rand_score(expected[labeled].astype(str), actual[labeled].astype(str))
+    assert ari >= LEIDEN_MIN_ARI, f"{where}: adjusted Rand index to the reference is {ari:.3f} < {LEIDEN_MIN_ARI}"
+
+
+def _assert_pca_close(actual, expected, where):
+    actual, expected = np.asarray(actual), np.asarray(expected)
+    assert actual.shape == expected.shape, f"{where}: shape {actual.shape} != {expected.shape}"
+    # the sign of each principal component is arbitrary
+    signs = np.where(np.sum(actual * expected, axis=0) < 0, -1.0, 1.0)
+    try:
+        np.testing.assert_allclose(actual * signs, expected, rtol=PCA_RTOL, atol=PCA_ATOL)
+    except AssertionError as e:
+        raise AssertionError(f"{where}: {e}") from e
+
+
+def _assert_knn_graph_close(actual, expected, where):
+    assert actual.shape == expected.shape, f"{where}: shape {actual.shape} != {expected.shape}"
+    edges_actual = set(zip(*sparse.coo_matrix(actual).nonzero(), strict=True))
+    edges_expected = set(zip(*sparse.coo_matrix(expected).nonzero(), strict=True))
+    overlap = len(edges_actual & edges_expected) / max(len(edges_actual | edges_expected), 1)
+    assert overlap >= KNN_MIN_EDGE_OVERLAP, (
+        f"{where}: only {overlap:.3f} of the kNN graph edges agree with the reference (< {KNN_MIN_EDGE_OVERLAP})"
+    )
+
+
 def _assert_table_equal(actual, expected, where):
     assert actual.shape == expected.shape, f"{where}: shape {actual.shape} != {expected.shape}"
-    _assert_frame_equal(actual.obs, expected.obs, f"{where}.obs")
+
+    # clustering outputs are compared with tolerances (see LEIDEN_MIN_ARI), everything else exactly
+    assert list(actual.obs.columns) == list(expected.obs.columns), (
+        f"{where}.obs: columns differ.\n"
+        f"Only in result: {sorted(set(actual.obs.columns) - set(expected.obs.columns))}\n"
+        f"Only in reference: {sorted(set(expected.obs.columns) - set(actual.obs.columns))}"
+    )
+    leiden_cols = [c for c in expected.obs.columns if c.startswith(LEIDEN_PREFIX)]
+    for col in leiden_cols:
+        _assert_leiden_agrees(actual.obs[col], expected.obs[col], f"{where}.obs[{col!r}]")
+    _assert_frame_equal(actual.obs.drop(columns=leiden_cols), expected.obs.drop(columns=leiden_cols), f"{where}.obs")
+
     _assert_frame_equal(actual.var, expected.var, f"{where}.var")
     _assert_array_equal(actual.X, expected.X, f"{where}.X")
-    for attr in ("layers", "obsm", "varm", "obsp", "varp"):
+
+    actual_obsm, expected_obsm = dict(actual.obsm), dict(expected.obsm)
+    if PCA_KEY in expected_obsm and PCA_KEY in actual_obsm:
+        _assert_pca_close(actual_obsm.pop(PCA_KEY), expected_obsm.pop(PCA_KEY), f"{where}.obsm[{PCA_KEY!r}]")
+    _assert_equal(actual_obsm, expected_obsm, f"{where}.obsm")
+
+    actual_obsp, expected_obsp = dict(actual.obsp), dict(expected.obsp)
+    for key in KNN_GRAPH_KEYS:
+        if key in expected_obsp and key in actual_obsp:
+            _assert_knn_graph_close(actual_obsp.pop(key), expected_obsp.pop(key), f"{where}.obsp[{key!r}]")
+    _assert_equal(actual_obsp, expected_obsp, f"{where}.obsp")
+
+    for attr in ("layers", "varm", "varp"):
         _assert_equal(dict(getattr(actual, attr)), dict(getattr(expected, attr)), f"{where}.{attr}")
 
     actual_uns, expected_uns = dict(actual.uns), dict(expected.uns)
@@ -97,6 +164,23 @@ def _assert_table_equal(actual, expected, where):
         for uns in (actual_uns, expected_uns):
             if isinstance(uns.get(key), pd.DataFrame):
                 uns[key] = uns[key].sort_values(sort_cols).reset_index(drop=True)
+    for key in CLUSTERING_SCORES:
+        if key in expected_uns and key in actual_uns:
+            a, e = float(actual_uns.pop(key)), float(expected_uns.pop(key))
+            assert abs(a - e) <= CLUSTERING_SCORE_ATOL, (
+                f"{where}.uns[{key!r}]: {a:.4f} differs from the reference {e:.4f} by more than {CLUSTERING_SCORE_ATOL}"
+            )
+    if PCA_KEY in expected_uns and PCA_KEY in actual_uns:
+        pca_actual, pca_expected = dict(actual_uns.pop(PCA_KEY)), dict(expected_uns.pop(PCA_KEY))
+        for key in ("variance", "variance_ratio"):
+            if key in pca_expected and key in pca_actual:
+                np.testing.assert_allclose(
+                    pca_actual.pop(key),
+                    pca_expected.pop(key),
+                    rtol=PCA_RTOL,
+                    err_msg=f"{where}.uns[{PCA_KEY!r}][{key!r}]",
+                )
+        _assert_equal(pca_actual, pca_expected, f"{where}.uns[{PCA_KEY!r}]")
     _assert_equal(actual_uns, expected_uns, f"{where}.uns")
 
 
