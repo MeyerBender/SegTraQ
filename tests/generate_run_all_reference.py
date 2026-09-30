@@ -16,6 +16,8 @@ test always use exactly the same inputs and arguments.
 """
 
 import argparse
+import functools
+import traceback
 import warnings
 from pathlib import Path
 
@@ -71,6 +73,25 @@ def run_all_on_proseg(
 
     segtraq_obj = st.SegTraQ(sdata, **SEGTRAQ_KWARGS)
 
+    # run_all catches the exception of a failing module and only warns, which loses the traceback.
+    # record it by wrapping the module runners, which run_all looks up on the instance at call time.
+    tracebacks = {}
+
+    def _record_traceback(name, method):
+        @functools.wraps(method)
+        def wrapper(*args, **kwargs):
+            try:
+                return method(*args, **kwargs)
+            except Exception:
+                tracebacks[name] = traceback.format_exc()
+                raise
+
+        return wrapper
+
+    for name in dir(segtraq_obj):
+        if name.startswith("run_") and name != "run_all" and callable(getattr(segtraq_obj, name)):
+            setattr(segtraq_obj, name, _record_traceback(name, getattr(segtraq_obj, name)))
+
     # run_all only warns when a module fails; the reference has to contain every module
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -80,7 +101,8 @@ def run_all_on_proseg(
         str(w.message) for w in caught if str(w.message).startswith(("Skipping `run_", "Could not run label transfer"))
     ]
     if failures:
-        raise RuntimeError("run_all did not run every module:\n" + "\n".join(failures))
+        details = "\n\n".join(f"Traceback of `{name}`:\n{tb}" for name, tb in tracebacks.items())
+        raise RuntimeError("run_all did not run every module:\n" + "\n".join(failures) + "\n\n" + details)
 
     return segtraq_obj.sdata
 
