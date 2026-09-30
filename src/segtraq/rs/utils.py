@@ -337,12 +337,13 @@ def _join_points_regions(
       - filters background points and genes not present in `sdata.tables[tables_key]`
       - converts points to a GeoDataFrame
       - performs a spatial join against `sdata.shapes[region_key]`
-      - deduplicates points that intersect multiple polygons by keeping one of the matches at
-        random (seeded by `random_state`, independent of the order of the join output)
-      - optionally keeps only points whose assigned region id equals points_cell_id_key
+      - optionally keeps only matches whose region id equals points_cell_id_key
         (useful when region ids are cell ids, e.g. centers/borders; ensures compatibility
         with 3D-aware segmentation, where transcripts may share x/y coordinates but
-        belong to different z-resolved cells)
+        belong to different z-resolved cells). This happens before deduplicating, so that a
+        point in overlapping regions is kept for the region of its own cell.
+      - deduplicates points that intersect multiple polygons by keeping one of the matches at
+        random (seeded by `random_state`, independent of the order of the join output)
 
     Parameters
     ----------
@@ -455,6 +456,12 @@ def _join_points_regions(
         predicate=predicate,
     ).drop(columns=["index_right"])
 
+    # optionally restrict to points whose region id matches another point column. this has to happen
+    # before the deduplication below: a point in the overlapping regions of two cells must be kept for
+    # the cell it is assigned to, not dropped because the other region was picked
+    if require_points_region_ID_match:
+        pts_joined = pts_joined[pts_joined["region_id"] == pts_joined[points_cell_id_key]]
+
     # if a point intersects multiple polygons, keep one of them at random. the random priority of each
     # (point, region) pair is a seeded hash of its values, not a random draw per row, so the choice does
     # not depend on the order of the sjoin output (which can differ between CPUs and package versions)
@@ -469,10 +476,6 @@ def _join_points_regions(
         .drop_duplicates(subset="point_id", keep="first")
         .drop(columns="_priority")
     )
-
-    # optionally restrict to points whose region id matches another point column
-    if require_points_region_ID_match:
-        pts_joined = pts_joined[pts_joined["region_id"] == pts_joined[points_cell_id_key]]
 
     # aggregate into region x gene counts
     all_genes = _get_genes(
