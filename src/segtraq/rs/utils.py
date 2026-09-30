@@ -324,6 +324,7 @@ def _join_points_regions(
     cell_type_query: str | list[str] | None = None,
     predicate: str = "intersects",
     require_points_region_ID_match: bool = True,
+    random_state: int = 0,
 ) -> tuple[gpd.GeoDataFrame, pd.DataFrame]:
     """
     Spatially join transcript points to region polygons and return:
@@ -336,8 +337,8 @@ def _join_points_regions(
       - filters background points and genes not present in `sdata.tables[tables_key]`
       - converts points to a GeoDataFrame
       - performs a spatial join against `sdata.shapes[region_key]`
-      - deduplicates points that intersect multiple polygons by keeping the match with the
-        smallest region id, so that the result does not depend on the order of the join output
+      - deduplicates points that intersect multiple polygons by keeping one of the matches at
+        random (seeded by `random_state`, independent of the order of the join output)
       - optionally keeps only points whose assigned region id equals points_cell_id_key
         (useful when region ids are cell ids, e.g. centers/borders; ensures compatibility
         with 3D-aware segmentation, where transcripts may share x/y coordinates but
@@ -384,6 +385,8 @@ def _join_points_regions(
         points column. Typical use: require_region_id_equals="cell_id" when `region_key`
         contains per-cell regions indexed by cell id (centers/borders).
         Set to None for nuclei (region ids are nucleus ids, not cell ids).
+    random_state: int, default=0
+        Seed for choosing among multiple regions that contain the same point.
 
     Returns
     -------
@@ -452,11 +455,19 @@ def _join_points_regions(
         predicate=predicate,
     ).drop(columns=["index_right"])
 
-    # if a point intersects multiple polygons, keep the match with the smallest region id.
-    # ties on point_id must be broken explicitly: the default quicksort is not stable, and the order
-    # of equal keys (and of the sjoin output) can differ between CPUs and package versions
-    pts_joined = pts_joined.sort_values(["point_id", "region_id"], kind="stable").drop_duplicates(
-        subset="point_id", keep="first"
+    # if a point intersects multiple polygons, keep one of them at random. the random priority of each
+    # (point, region) pair is a seeded hash of its values, not a random draw per row, so the choice does
+    # not depend on the order of the sjoin output (which can differ between CPUs and package versions)
+    priority = pd.util.hash_pandas_object(
+        pts_joined[["point_id", "region_id"]],
+        index=False,
+        hash_key=str(random_state).zfill(16)[-16:],
+    ).to_numpy()
+    pts_joined = (
+        pts_joined.assign(_priority=priority)
+        .sort_values(["point_id", "_priority"], kind="stable")
+        .drop_duplicates(subset="point_id", keep="first")
+        .drop(columns="_priority")
     )
 
     # optionally restrict to points whose region id matches another point column
