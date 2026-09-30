@@ -11,7 +11,7 @@ from rtree.index import Index
 from scipy.sparse import coo_matrix
 from shapely.geometry.base import BaseGeometry
 
-from ..utils import _get_genes, _is_background, filter_cells
+from ..utils import _get_genes, _is_background, _same_xy_transformations, filter_cells
 
 
 def _safe_intersection_area(poly1: BaseGeometry, poly2: BaseGeometry) -> float:
@@ -398,6 +398,15 @@ def _join_points_regions(
         Region x gene count matrix (rows = all regions from shapes index, columns = all genes).
     """
 
+    # the join compares raw point and polygon coordinates, so both must live in the same x/y space
+    T_points = sdata.points[points_key].attrs.get("transform", {})
+    T_regions = sdata.shapes[region_key].attrs.get("transform", {})
+    if not _same_xy_transformations(T_points, T_regions):
+        raise ValueError(
+            f"Transcripts ({points_key!r}) and regions ({region_key!r}) are not aligned: their transformations "
+            f"differ in the x/y plane ({T_points} vs {T_regions}). Please ensure they share the same transformation."
+        )
+
     transcripts = _get_filtered_points_df(
         sdata=sdata,
         tables_gene_key=tables_gene_key,
@@ -443,9 +452,9 @@ def _join_points_regions(
     region_gdf.reset_index(inplace=True)
     region_gdf = region_gdf[["region_id", "geometry"]]
 
-    # drop the spatialdata metadata (e.g. transformations) carried over from the points and shapes:
-    # sjoin concatenates both frames, and pandas then compares their attrs, which raises when the
-    # transformations are defined over different axes (3D points vs 2D shapes)
+    # drop the spatialdata metadata (transformations, checked for x/y alignment above) carried over from
+    # the points and shapes: sjoin concatenates both frames, and pandas then compares their attrs, which
+    # raises when the transformations are defined over different axes (3D points vs 2D shapes)
     pts_gdf.attrs = {}
     region_gdf.attrs = {}
 
