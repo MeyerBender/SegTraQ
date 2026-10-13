@@ -1872,7 +1872,8 @@ def validate_spatialdata(
 
         # ensuring that all cell IDs have the same dtype (either str or numeric)
         # taking a random ID from each set and comparing dtypes
-        transcript_sample = next(iter(transcript_ids))
+        # missing values are skipped, since they can encode background transcripts (points_background_id=None)
+        transcript_sample = next((x for x in transcript_ids if not _is_missing(x)), None)
         shapes_sample = next(iter(shapes_cell_ids))
 
         def is_numeric(x):
@@ -1881,7 +1882,9 @@ def validate_spatialdata(
         def is_string(x):
             return isinstance(x, str)
 
-        if (is_numeric(transcript_sample) and is_numeric(shapes_sample)) or (
+        if transcript_sample is None:
+            pass  # all point cell IDs are missing, there is nothing to compare
+        elif (is_numeric(transcript_sample) and is_numeric(shapes_sample)) or (
             is_string(transcript_sample) and is_string(shapes_sample)
         ):
             pass  # OK, both numeric or both string
@@ -1893,20 +1896,30 @@ def validate_spatialdata(
             )
 
         # if the user provided a background ID, we want to ensure that it actually occurs
-        if points_background_id is not None:
-            most_common_points_id = points_df[points_cell_id_key].mode().iloc[0]
+        # (None, np.nan and pd.NA are all treated as "missing", consistent with _is_background)
+        if not pd.isna(points_background_id):
+            # dropna=False, so that missing cell IDs (a common background encoding) are reported as well
+            most_common_points_id = points_df[points_cell_id_key].mode(dropna=False).iloc[0]
+            if pd.isna(most_common_points_id):
+                most_common_hint = (
+                    "The most common cell ID among points is a missing value (None/NaN). "
+                    "If these are your background points, set 'points_background_id=None'."
+                )
+            else:
+                most_common_hint = f"The most common cell ID among points is '{most_common_points_id}'."
+
             assert points_background_id in transcript_ids, (
                 f"points_background_id '{points_background_id}' not found among point cell IDs. "
                 f"You can set this with the 'points_background_id' argument. "
-                f"The most common cell ID among points is '{most_common_points_id}'. "
+                f"{most_common_hint} "
                 f"If you do not have a background ID, set this parameter to None."
             )
 
             # as a more stringent check, we also raise a warning if the background ID is not the most common one
-            if most_common_points_id != points_background_id:
+            if pd.isna(most_common_points_id) or most_common_points_id != points_background_id:
                 warnings.warn(
                     f"points_background_id '{points_background_id}' is not the most common cell ID "
-                    f"among points (most common is '{most_common_points_id}'). "
+                    f"among points. {most_common_hint} "
                     "This may indicate that your background ID is not correctly set. "
                     "If you are sure that 'points_background_id' is correct, you can ignore this warning.",
                     UserWarning,
@@ -1923,8 +1936,8 @@ def validate_spatialdata(
                     "points_background_id is None, but no missing values (None/np.nan/pd.NA) were "
                     "found among point cell IDs. "
                     "If your background points are denoted with an explicit value (e.g. 0, -1, 'background'), "
-                    "pass that value as 'points_background_id' instead."
-                    f"The most common cell ID among points is '{most_common_points_id}'. ",
+                    "pass that value as 'points_background_id' instead. "
+                    f"The most common cell ID among points is '{most_common_points_id}'.",
                     UserWarning,
                     stacklevel=2,
                 )
