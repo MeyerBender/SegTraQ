@@ -49,3 +49,19 @@ def test_constructor_missing_table_centroids(sdata_new):
         "Centroid columns were not computed correctly during SegTraQ construction. "
         f"Example:\nOld centroids:\n{centroids_old.head()}\nNew centroids:\n{centroids_new.head()}"
     )
+
+
+@pytest.mark.parametrize("cell_id_dtype", ["string", "category", "object"])
+def test_constructor_pandas_string_cell_id_dtypes(sdata_new, cell_id_dtype):
+    # pandas extension dtypes (e.g. 'string[python]') cannot be interpreted by np.issubdtype,
+    # so validation must also work when the table cell IDs use them
+    sdata = sd.deepcopy(sdata_new)
+    obs = sdata.tables["table"].obs
+    obs["cell_id"] = obs["cell_id"].astype(str).astype(cell_id_dtype)
+    st.SegTraQ(
+        sdata,
+        tables_centroid_x_key="x_centroid",
+        tables_centroid_y_key="y_centroid",
+        images_key="image",
+        filter_kwargs={"inplace": False},
+    )
