@@ -57,6 +57,9 @@ def test_constructor_pandas_string_cell_id_dtypes(sdata_new, cell_id_dtype):
     # so validation must also work when the table cell IDs use them
     sdata = sd.deepcopy(sdata_new)
     obs = sdata.tables["table"].obs
+    # the fixture uses 'cell_id' as both index name and column; remove the index name so that
+    # the cell IDs only live in the column and validation reaches the shapes/tables dtype check
+    obs.index.name = None
     obs["cell_id"] = obs["cell_id"].astype(str).astype(cell_id_dtype)
     st.SegTraQ(
         sdata,
