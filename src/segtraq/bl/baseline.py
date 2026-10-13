@@ -218,11 +218,13 @@ def perc_unassigned_transcripts_per_gene(
     # Compute only necessary columns
     df = points[[points_gene_key, points_cell_id_key]].compute()
 
-    # Aggregate total and unassigned counts efficiently
+    # Aggregate total and unassigned counts efficiently.
+    # "size" (not "count") so that rows with a missing cell id, which can encode
+    # unassigned transcripts, are included in the total.
     result = (
         df.groupby(points_gene_key, observed=True)[points_cell_id_key]
         .agg(
-            total="count",
+            total="size",
             unassigned=lambda x: _is_background(x, points_background_id).sum(),
         )
         .astype(int)
